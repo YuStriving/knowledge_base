@@ -1,9 +1,15 @@
+import os
+import shutil
 import sys
+import time
+import zipfile
 from pathlib import Path
+
+import requests
 
 from app.conf.mineru_config import mineru_config
 from app.core.logger import logger
-from app.query_process.agent.state import ImportGraphState
+from app.query_process.agent.state import ImportGraphState, create_default_state
 from app.utils.format_utils import format_state
 from app.utils.task_utils import add_running_task, add_done_task
 
@@ -39,7 +45,7 @@ def node_pdf_to_md(state: ImportGraphState) -> ImportGraphState:
         # 步骤2：上传PDF至MinerU并轮询解析结果
         zip_url = step_2_upload_and_poll(pdf_path_obj, output_dir_obj)
 
-        # 步骤3：下载ZIP包并提取MD文件
+        # 步骤3：下载ZIP包并提取MD文件,stem  文件的纯名称（无后缀、无路径）
         md_path = step_3_download_and_extract(zip_url, output_dir_obj, pdf_path_obj.stem)
 
         # 更新工作流状态：记录MD文件路径和内容
@@ -333,7 +339,7 @@ def step_3_download_and_extract(zip_url: str, output_dir_obj: Path, pdf_stem: st
     logger.info(f"===== [{pdf_stem}]解析结果处理完成，最终MD文件路径：{final_md_path} =====")
     return final_md_path
 
-    
+
 if __name__ == "__main__":
 
     # 单元测试：验证PDF转MD全流程
