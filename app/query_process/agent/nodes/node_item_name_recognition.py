@@ -134,3 +134,341 @@ def step_1_get_inputs(state: ImportGraphState) -> Tuple[str, List[Dict]]:
 
     logger.info(f"步骤1：输入校验完成，获取到{len(chunks)}个有效文本切片")
     return file_title, chunks
+
+
+def step_2_build_context(chunks: List[Dict], k: int = DEFAULT_ITEM_NAME_CHUNK_K, max_chars: int = CONTEXT_TOTAL_MAX_CHARS) -> str:
+    """
+    步骤 2: 构造大模型商品名称识别的标准化上下文
+    核心作用：
+        1. 限制切片数量：仅取前k个切片，避免上下文过长
+        2. 限制字符长度：单切片+总上下文双重字符限制，适配大模型输入上限
+        3. 格式化内容：带序号的结构化格式，提升大模型识别精度
+        4. 过滤无效切片：跳过空内容/非字典类型切片，保证上下文有效性
+    参数说明：
+        chunks: 文本切片列表（每个元素为字典，需包含"title"和"content"键）
+        k: 最大取片数，默认5个（可通过配置调整）
+        max_chars: 上下文总字符数上限，默认2500（适配大模型输入限制）
+    返回值：
+        str: 格式化后的上下文字符串（直接传给大模型，空切片时返回空字符串）
+    """
+    # 空切片直接返回空字符串，无需后续处理
+    if not chunks:
+        return ""
+
+    # 存储格式化后的切片片段，保证上下文结构化
+    parts: List[str] = []
+    # 统计已拼接字符数，用于控制总长度不超限
+    total_chars = 0
+
+    # 遍历前k个切片，避免上下文过长
+    for idx, chunk in enumerate(chunks[:k]):
+        # 跳过非字典类型切片，防止键取值报错
+        if not isinstance(chunk, dict):
+            logger.debug(f"第{idx+1}个切片非字典类型，已过滤")
+            continue
+
+        # 提取切片标题和内容，去首尾空格，过滤无效字符
+        chunk_title = chunk.get("title", "").strip()
+        chunk_content = chunk.get("content", "").strip()
+
+        # 标题和内容均为空，跳过该无效切片
+        if not (chunk_title or chunk_content):
+            logger.debug(f"第{idx+1}个切片为空白内容，已过滤")
+            continue
+
+        # 单切片内容截断：防止单个切片内容过长占满上下文
+        if len(chunk_content) > SINGLE_CHUNK_CONTENT_MAX_LEN:
+            chunk_content = chunk_content[:SINGLE_CHUNK_CONTENT_MAX_LEN]
+            logger.debug(f"第{idx+1}个切片内容过长，已截断至{SINGLE_CHUNK_CONTENT_MAX_LEN}字符")
+
+        # 结构化格式化切片：带序号+标题+内容，提升大模型识别效率
+        piece = f"【切片{idx + 1}】\n标题：{chunk_title} \n内容：{chunk_content}"
+        parts.append(piece)
+        # 累计字符数，包含分隔符
+        total_chars += len(piece)
+
+        # 总字符数超限时立即停止拼接，避免大模型输入超限
+        if total_chars > max_chars:
+            logger.info(f"上下文总字符数即将超限（{max_chars}），已停止拼接后续切片")
+            break
+
+    # 用空行分隔切片片段，拼接为最终上下文，最后一次去重空格
+    context = "\n\n".join(parts).strip()
+    # 最终二次截断，确保绝对不超限
+    final_context = context[:max_chars]
+    logger.info(f"步骤2：上下文构建完成，最终长度{len(final_context)}字符")
+    return final_context
+
+def step_3_call_llm(file_title: str, context: str) -> str:
+    """
+    步骤 3: 调用大模型实现商品名称/型号精准识别
+    核心逻辑：
+        1. 上下文为空 → 直接返回file_title（兜底，无需调用大模型）
+        2. 上下文非空 → 加载标准化prompt模板，构建大模型对话消息
+        3. 调用大模型后对返回结果做清洗，过滤无效字符
+        4. 大模型返回空/调用异常 → 均返回file_title兜底，保证流程不中断
+    核心特性：
+        - 提示词解耦：通过load_prompt加载本地模板，无需硬编码
+        - 格式兼容：兼容不同LLM客户端返回格式，防止属性报错
+        - 异常兜底：全异常捕获，大模型服务不可用时不影响主流程
+    参数：
+        file_title: 处理后的文件标题（异常/空值时的兜底值）
+        context: 步骤2构建的结构化切片上下文（大模型识别的核心依据）
+    返回值：
+        str: 清洗后的商品名称（异常/空值时返回原始file_title）
+    """
+    logger.info("开始执行步骤3：调用大模型识别商品名称")
+
+    # 上下文为空时，直接返回文件标题，跳过大模型调用
+    if not context:
+        logger.warning("上下文为空，跳过大模型调用，直接使用文件标题作为商品名称")
+        return file_title
+
+    try:
+        # 加载商品名称识别prompt模板，动态传入文件标题和上下文
+        human_prompt = load_prompt("item_name_recognition", file_title=file_title, context=context)
+        # 加载系统提示词，定义大模型角色（商品识别专家，仅返回纯结果）
+        system_prompt = load_prompt("product_recognition_system")
+        logger.debug(f"大模型调用提示词构建完成，系统提示词长度{len(system_prompt)}，人类提示词长度{len(human_prompt)}")
+
+        # 获取大模型客户端：json_mode=False，要求返回纯文本而非JSON格式
+        llm = get_llm_client(json_mode=False)
+        if not llm:
+            logger.error("大模型客户端获取失败，使用文件标题兜底")
+            return file_title
+
+        # 标准化构建大模型对话消息：SystemMessage定义角色 + HumanMessage传递业务请求
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=human_prompt)
+        ]
+        # 调用大模型并获取返回结果
+        resp = llm.invoke(messages)
+
+        # 兼容不同LLM客户端返回格式：优先取content字段，无则返回空字符串
+        item_name = getattr(resp, "content", "").strip()
+        # 清洗返回结果：过滤空格、换行、回车、制表符等无效字符
+        item_name = item_name.replace(" ", "").replace("\n", "").replace("\r", "").replace("\t", "")
+
+        # 清洗后结果为空，使用文件标题兜底
+        if not item_name:
+            logger.warning("大模型返回空内容，使用文件标题作为商品名称兜底")
+            return file_title
+
+        logger.info(f"步骤3：大模型识别商品名称成功，结果为：{item_name}")
+        return item_name
+
+    # 捕获所有异常：大模型调用超时、网络错误、格式错误等，均不中断主流程
+    except Exception as e:
+        logger.error(f"步骤3：大模型调用失败，原因：{str(e)}", exc_info=True)
+        # 异常时返回文件标题兜底，保证流程继续执行
+        return file_title
+
+def step_4_update_chunks(state: ImportGraphState, chunks: List[Dict], item_name: str):
+    """
+    步骤 4: 回填商品名称到流程状态和所有文本切片
+    核心作用：
+        1. 全局状态更新：将item_name存入state，供下游所有节点直接使用
+        2. 切片数据补全：为每个切片添加item_name字段，保证数据一致性
+        3. 状态同步：更新state中的chunks，确保切片修改全局生效
+    设计思路：
+        所有切片关联同一商品名称，保证后续向量入库、检索时的维度一致性
+    参数：
+        state: 流程状态对象（ImportGraphState），全局数据载体
+        chunks: 校验后的文本切片列表（步骤1输出）
+        item_name: 步骤3识别并清洗后的商品名称
+    """
+    # 将商品名称存入全局状态，供下游节点调用
+    state["item_name"] = item_name
+    # 遍历所有切片，为每个切片添加商品名字段，保证数据全链路一致
+    for chunk in chunks:
+        chunk["item_name"] = item_name
+    # 同步更新state中的切片列表，确保修改全局生效
+    state["chunks"] = chunks
+    logger.info(f"步骤4：商品名称回填完成，共为{len(chunks)}个切片添加item_name字段，值为：{item_name}")
+
+def step_5_generate_vectors(item_name: str) -> Tuple[Any, Any]:
+    """
+    步骤 5: 为商品名称生成BGE-M3稠密+稀疏双向量（Milvus向量检索核心）
+    核心说明：
+        - 稠密向量（dense_vector）：BGE-M3固定1024维，记录文本深层语义信息
+        - 稀疏向量（sparse_vector）：变长键值对，记录文本关键词/特征位置信息
+    依赖工具：
+        generate_embeddings：封装BGE-M3模型，批量生成双向量，兼容单条/批量输入
+    参数：
+        item_name: 步骤3识别的商品名称（非空，空值时直接返回空向量）
+    返回值：
+        Tuple[Any, Any]: (稠密向量列表, 稀疏向量字典)，空值/异常时返回(None, None)
+    """
+    logger.info(f"开始执行步骤5：为商品名称[{item_name}]生成BGE-M3双向量")
+
+    # 商品名称为空，直接返回空向量，跳过模型调用
+    if not item_name:
+        logger.warning("商品名称为空，跳过向量生成，返回空向量")
+        return None, None
+
+    try:
+        # 调用向量生成工具：传入列表支持批量生成，单条数据仍用列表保证格式统一
+        vector_result = generate_embeddings([item_name])
+
+        # 向量生成结果非空，才进行后续解析
+        if vector_result and "dense" in vector_result and "sparse" in vector_result:
+            # 稠密向量解析：取批量结果第一个，为Python列表（Milvus存储要求）
+            dense_vector = vector_result["dense"][0]
+            # 稀疏向量解析：取批量结果第一个，CSR矩阵解析为字典格式
+            sparse_vector = vector_result["sparse"][0]
+            logger.info("步骤5：BGE-M3稠密+稀疏向量生成成功")
+        else:
+            logger.warning("步骤5：向量生成工具返回空结果，无法提取双向量")
+            dense_vector, sparse_vector = None, None
+
+    # 捕获所有异常：模型加载失败、向量生成超时、格式错误等
+    except Exception as e:
+        logger.error(f"步骤5：向量生成失败，原因：{str(e)}", exc_info=True)
+        dense_vector, sparse_vector = None, None
+
+    return dense_vector, sparse_vector
+
+def step_6_save_to_milvus(state: ImportGraphState, file_title: str, item_name: str, dense_vector, sparse_vector):
+    """
+    步骤 6: 将商品名称、文件标题、双向量持久化到Milvus向量数据库
+    核心逻辑：
+        1. 配置校验：检查Milvus连接地址和集合名配置，缺失则跳过
+        2. 客户端获取：获取单例Milvus客户端，连接失败则跳过
+        3. 集合初始化：无集合则创建（定义Schema+索引），有集合则直接使用（保留原有配置）
+        4. 幂等性处理：删除同名商品数据，避免重复存储
+        5. 数据插入：构造符合Schema的数据，非空向量才添加
+        6. 集合加载：插入后强制加载集合，确保数据立即可查/Attu可见
+    参数：
+        state: 流程状态对象，用于最终状态同步
+        file_title: 处理后的文件标题
+        item_name: 识别后的商品名称（主键去重依据）
+        dense_vector: 步骤5生成的稠密向量（1024维列表）
+        sparse_vector: 步骤5生成的稀疏向量（字典格式）
+    """
+    # 从环境变量读取Milvus核心配置，与MilvusConfig配置类保持一致
+    milvus_uri = os.environ.get("MILVUS_URL")
+    collection_name = os.environ.get("ITEM_NAME_COLLECTION")
+
+    # 配置缺失校验：任一配置为空则跳过Milvus存储，记录警告
+    if not all([milvus_uri, collection_name]):
+        logger.warning("Milvus配置缺失（MILVUS_URL/ITEM_NAME_COLLECTION），跳过数据保存")
+        return
+
+    logger.info(f"开始执行步骤6：将商品名称[{item_name}]保存到Milvus集合[{collection_name}]")
+
+    try:
+        # 获取Milvus单例客户端，连接失败则直接返回
+        client = get_milvus_client()
+        if not client:
+            logger.error("无法获取Milvus客户端（连接失败），跳过数据保存")
+            return
+
+        # 集合初始化：不存在则创建（定义Schema+索引），存在则直接使用
+        if not client.has_collection(collection_name=collection_name):
+            logger.info(f"Milvus集合[{collection_name}]不存在，开始创建Schema和索引")
+            # 创建集合Schema：自增主键+动态字段，适配灵活的数据存储
+            schema = client.create_schema(auto_id=True, enable_dynamic_field=True)
+            # 添加自增主键字段：INT64类型，唯一标识每条数据
+            schema.add_field(
+                field_name="pk",
+                datatype=DataType.INT64,
+                is_primary=True,
+                auto_id=True
+            )
+            # 添加文件标题字段：VARCHAR类型，最大长度65535，适配长标题
+            schema.add_field(
+                field_name="file_title",
+                datatype=DataType.VARCHAR,
+                max_length=65535
+            )
+            # 添加商品名字段：VARCHAR类型，最大长度65535，去重依据
+            schema.add_field(
+                field_name="item_name",
+                datatype=DataType.VARCHAR,
+                max_length=65535
+            )
+            # 添加稠密向量字段：FLOAT_VECTOR，1024维（BGE-M3固定维度）
+            schema.add_field(
+                field_name="dense_vector",
+                datatype=DataType.FLOAT_VECTOR,
+                dim=1024
+            )
+            # 添加稀疏向量字段：SPARSE_FLOAT_VECTOR，变长
+            schema.add_field(
+                field_name="sparse_vector",
+                datatype=DataType.SPARSE_FLOAT_VECTOR
+            )
+
+            # 构建索引参数：为向量字段创建索引，提升检索性能
+            index_params = client.prepare_index_params()
+            # 优化版稠密向量索引：HNSW + COSINE (恢复最佳性能配置)
+            index_params.add_index(
+                field_name="dense_vector",
+                index_name="dense_vector_index",
+                # HNSW (Hierarchical Navigable Small World) 是目前性能最好、最常用的基于图的索引，检索速度极快，精度极高。
+                index_type="HNSW",
+                # 使用 COSINE 作为稠密向量相似度计算方式
+                metric_type="COSINE",
+                # M: 图中每个节点的最大连接数(常用16-64)
+                # efConstruction: 构建索引时的搜索范围(越大建索引越慢，但精度越高，常用100-200)
+                # 不同数据体量的推荐建议(万级)：
+                # 10000 条数据：M=16, efConstruction=200
+                # 50000 条数据：M=32, efConstruction=300
+                # 100000 条数据：M=64, efConstruction=400
+                params={"M": 16, "efConstruction": 200}
+            )
+
+            # 稀疏向量索引：专用SPARSE_INVERTED_INDEX+IP，关闭量化保证精度
+            index_params.add_index(
+                field_name="sparse_vector",
+                index_name="sparse_vector_index",
+                # 稀疏倒排索引 专门为稀疏向量（比如文本的 TF-IDF 向量、关键词权重向量，特点是大部分元素为 0，只有少数维度有值）设计的倒排索引，是稀疏向量检索的标配索引类型。
+                index_type="SPARSE_INVERTED_INDEX",
+                # IP（内积，Inner Product）如果向量是 “文本语义向量 + 关键词权重”，长度代表文本与主题的关联强度，此时用 IP 能同时体现 “语义匹配度” 和 “关联强度”。
+                metric_type="IP",
+                # DAAT_MAXSCORE：稀疏向量检索时，只计算可能得高分的维度，跳过大量0值，速度更快。
+                # quantization="none"：稀疏向量里的权重是小数，不做压缩，保证精度不丢。
+                params={"inverted_index_algo": "DAAT_MAXSCORE", "quantization": "none"}
+            )
+
+            # 创建集合：Schema + 索引参数
+            client.create_collection(collection_name=collection_name, schema=schema, index_params=index_params)
+            logger.info(f"Milvus集合[{collection_name}]创建成功，包含Schema和向量索引")
+
+        # 幂等性处理：删除同名商品数据，避免重复存储（核心：先加载集合才能删除）
+        clean_item_name = (item_name or "").strip()
+        if clean_item_name:
+            client.load_collection(collection_name=collection_name)
+            # 商品名称转义，防止特殊字符导致过滤表达式解析失败
+            safe_item_name = escape_milvus_string(clean_item_name)
+            filter_expr = f'item_name=="{safe_item_name}"'
+            # 执行删除操作
+            client.delete(collection_name=collection_name, filter=filter_expr)
+            logger.info(f"Milvus幂等性处理完成，已删除集合中[{clean_item_name}]的历史数据")
+
+        # 构造插入Milvus的数据：基础字段+非空向量字段
+        data = {
+            "file_title": file_title,
+            "item_name": item_name
+        }
+        # 稠密向量非空才添加，避免空值入库报错
+        if dense_vector is not None:
+            data["dense_vector"] = dense_vector
+        # 稀疏向量非空则归一化后添加，保证检索准确性
+        if sparse_vector is not None:
+            data["sparse_vector"] = sparse_vector
+
+        # 插入数据：列表格式支持批量插入，单条数据保持格式统一
+        client.insert(collection_name=collection_name, data=[data])
+        # 插入后强制加载集合，确保数据立即可查、Attu可视化界面可见
+        client.load_collection(collection_name=collection_name)
+
+        # 最终同步商品名称到全局状态
+        state["item_name"] = item_name
+        logger.info(f"步骤6：商品名称[{item_name}]成功存入Milvus集合[{collection_name}]，数据：{list(data.keys())}")
+
+    # 捕获所有Milvus操作异常：连接中断、入库失败、索引错误等，不中断主流程
+    except Exception as e:
+        logger.error(f"步骤6：数据存入Milvus失败，原因：{str(e)}", exc_info=True)
+
