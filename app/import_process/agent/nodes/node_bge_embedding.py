@@ -1,7 +1,7 @@
 import sys
 
 from app.core.logger import logger
-from app.query_process.agent.state import ImportGraphState
+from app.import_process.agent.state import ImportGraphState
 
 def node_bge_embedding(state: ImportGraphState) -> ImportGraphState:
     """

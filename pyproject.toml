@@ -22,5 +22,5 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "python-multipart>=0.0.28",
     "regex>=2026.5.9",
-    "uvicorn>=0.46.0",
+    "uvicorn[standard]>=0.46.0",
 ]

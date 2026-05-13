@@ -9,7 +9,7 @@ import requests
 
 from app.conf.mineru_config import mineru_config
 from app.core.logger import logger
-from app.query_process.agent.state import ImportGraphState, create_default_state
+from app.import_process.agent.state import ImportGraphState, create_default_state
 from app.utils.format_utils import format_state
 from app.utils.task_utils import add_running_task, add_done_task
 
