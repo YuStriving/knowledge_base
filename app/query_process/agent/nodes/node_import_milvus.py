@@ -112,44 +112,6 @@ def step_1_check_input(state: Dict[str, Any]) -> tuple[List[Dict[str, Any]], int
 
     return state
 
-def step_1_check_input(state: Dict[str, Any]) -> tuple[List[Dict[str, Any]], int]:
-    """
-    步骤1：输入数据有效性校验（入库前置必检）
-    核心校验项：
-        1. chunks非空且为列表类型
-        2. 切片包含dense_vector核心字段（上游向量化节点必输）
-        3. 提取向量维度，为集合创建/索引构建提供依据
-    参数：
-        state: Dict[str, Any] - 流程状态对象，包含上游传入的chunks数据
-    返回：
-        tuple - (校验通过的切片列表, 稠密向量维度)
-    异常：
-        任一校验项不通过，抛出ValueError终止入库流程，避免脏数据处理
-    """
-    # 提取待入库的切片数据
-    chunks_json_data = state.get("chunks")
-    # 校验1：chunks非空
-    if not chunks_json_data:
-        logger.error("Milvus入库校验失败：state中chunks字段为空")
-        raise ValueError("错误: chunks为空，无法执行Milvus入库")
-    # 校验2：chunks为非空列表
-    if not isinstance(chunks_json_data, list) or len(chunks_json_data) == 0:
-        logger.error("Milvus入库校验失败：chunks非列表类型或为空列表")
-        raise ValueError("错误: chunks数据格式不正确，必须为非空列表")
-    # 校验3：切片包含dense_vector字段（向量化节点核心产出）
-    first_chunk = chunks_json_data[0]
-    if 'dense_vector' not in first_chunk:
-        logger.error("Milvus入库校验失败：切片缺失dense_vector字段，上游向量化节点可能执行失败")
-        raise ValueError("错误: 数据中缺失dense_vector字段，请检查上游向量化节点执行状态")
-
-    # 提取向量维度和商品名称，用于后续集合创建/日志展示
-    vector_dimension = len(first_chunk['dense_vector'])
-    item_name = first_chunk.get('item_name', '未知商品名')
-    logger.info(
-        f"Milvus入库校验通过，待入库切片数：{len(chunks_json_data)} | 向量维度：{vector_dimension} | 商品名称：{item_name}")
-
-    return chunks_json_data, vector_dimension
-
 def create_collection(client, collection_name: str, vector_dimension: int):
     """
     辅助函数：Milvus集合+索引自动创建
