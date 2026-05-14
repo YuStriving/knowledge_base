@@ -15,6 +15,7 @@ dependencies = [
     "minio>=7.2.20",
     "modelscope>=1.36.3",
     "numpy>=2.4.4",
+    "openai-agents>=0.4.2",
     "pandas>=3.0.2",
     "pymilvus>=3.0.0",
     "pymilvus-model>=0.3.2",
