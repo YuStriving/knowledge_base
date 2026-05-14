@@ -15,7 +15,7 @@ from app.clients.minio_utils import get_minio_client
 from app.import_process.agent.state import ImportGraphState
 from app.utils.task_utils import add_running_task
 # LLM客户端工具类（核心复用，替换原生OpenAI调用）
-from app.lm.llm_utils import get_llm_client
+from app.lm.lm_utils import get_llm_client
 # LangChain多模态依赖（消息构造+异常捕获）
 from langchain.messages import HumanMessage
 from langchain_core.exceptions import LangChainException

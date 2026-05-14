@@ -10,7 +10,7 @@ from app.core.load_prompt import load_prompt
 from app.query_process.agent.state import QueryGraphState
 from app.utils.task_utils import add_running_task, add_done_task
 from app.clients.mongo_history_utils import get_recent_messages, save_chat_message, update_message_item_names
-from app.lm.llm_utils import get_llm_client
+from app.lm.lm_utils import get_llm_client
 from app.lm.embedding_utils import generate_embeddings
 from app.clients.milvus_utils import get_milvus_client, create_hybrid_search_requests, hybrid_search
 from dotenv import load_dotenv,find_dotenv
@@ -26,6 +26,14 @@ def node_item_name_confirm(state):
     4. 同步历史记录 ：将改写后的问题、确认的商品名和处理状态实时写入 MongoDB 数据库。
     输入：state['original_query']
     输出：更新 state['item_names']
+    确认商品名字
+    你："我想找《哈利波特》"
+    图书管理员："你是指《哈利波特与魔法石》还是《哈利波特与密室》？"
+    你："魔法石"
+    管理员："好的，确认是《哈利波特与魔法石》"
+
+    这一步 = node_item_name_confirm
+    作用：确认你要找的具体是哪本书
     """
     logger.info(">>> node_item_name_confirm: 开始处理")
     
